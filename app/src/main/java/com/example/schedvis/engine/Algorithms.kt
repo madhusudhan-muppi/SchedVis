@@ -4,7 +4,8 @@ package com.example.schedvis.engine
 // DATA CLASSES
 // ==========================================
 
-data class Process(val id: String, val arrival: Int, val burst: Int)
+// priority: lower number = higher priority (Galvin convention). Defaults to 0 for algorithms that ignore it.
+data class Process(val id: String, val arrival: Int, val burst: Int, val priority: Int = 0)
 
 data class GanttSlot(val pid: String?, val start: Int, val end: Int)   // pid = null means CPU idle
 
@@ -33,6 +34,27 @@ private fun MutableList<GanttSlot>.addSlot(pid: String?, start: Int, end: Int) {
     } else {
         add(GanttSlot(pid, start, end))
     }
+}
+
+private val EMPTY_SCHEDULE = SchedulingResult(emptyList(), emptyList(), 0.0, 0.0)
+
+// Turns completion times into per-process metrics and averages.
+private fun buildResult(
+    processes: List<Process>,
+    timeline: List<GanttSlot>,
+    completionTimes: Map<String, Int>
+): SchedulingResult {
+    val perProcess = processes.map { p ->
+        val completion = completionTimes[p.id] ?: 0
+        val turnaround = completion - p.arrival
+        ProcessResult(p.id, completion, turnaround, turnaround - p.burst)
+    }
+    return SchedulingResult(
+        timeline,
+        perProcess,
+        perProcess.map { it.turnaround }.average(),
+        perProcess.map { it.waiting }.average()
+    )
 }
 
 // ==========================================
@@ -110,6 +132,92 @@ fun sjf(processes: List<Process>): SchedulingResult {
     val avgWaiting = perProcess.map { it.waiting }.average()
 
     return SchedulingResult(timeline, perProcess, avgTurnaround, avgWaiting)
+}
+
+// Shortest Remaining Time First: preemptive SJF.
+// Every time unit, the arrived process with the least remaining time runs.
+fun srtf(processes: List<Process>): SchedulingResult =
+    runPreemptive(processes) { _, remaining -> remaining }
+
+// Priority (non-preemptive): when the CPU is free, the arrived process with the
+// highest priority (lowest number) runs to completion.
+fun priorityNonPreemptive(processes: List<Process>): SchedulingResult =
+    runNonPreemptive(processes, compareBy<Process>({ it.priority }, { it.arrival }, { it.id }))
+
+// Priority (preemptive): a newly arrived process with a higher priority
+// (lower number) takes the CPU away from the running one.
+fun priorityPreemptive(processes: List<Process>): SchedulingResult =
+    runPreemptive(processes) { p, _ -> p.priority }
+
+// Shared logic for non-preemptive algorithms: pick the best available process, run it to the end.
+private fun runNonPreemptive(processes: List<Process>, order: Comparator<Process>): SchedulingResult {
+    if (processes.isEmpty()) return EMPTY_SCHEDULE
+
+    val timeline = mutableListOf<GanttSlot>()
+    val completionTimes = mutableMapOf<String, Int>()
+    val remaining = processes.toMutableList()
+    var currentTime = 0
+
+    while (remaining.isNotEmpty()) {
+        val available = remaining.filter { it.arrival <= currentTime }
+        if (available.isEmpty()) {
+            val nextArrival = remaining.minOf { it.arrival }
+            timeline.addSlot(null, currentTime, nextArrival)
+            currentTime = nextArrival
+            continue
+        }
+        val selected = available.minWithOrNull(order)!!
+        remaining.remove(selected)
+        timeline.addSlot(selected.id, currentTime, currentTime + selected.burst)
+        currentTime += selected.burst
+        completionTimes[selected.id] = currentTime
+    }
+    return buildResult(processes, timeline, completionTimes)
+}
+
+// Shared logic for preemptive algorithms: simulate one time unit at a time and
+// re-pick the best process every unit. key(process, remainingTime): smaller = runs first.
+// Ties go to the earlier arrival, then the smaller id.
+private fun runPreemptive(processes: List<Process>, key: (Process, Int) -> Int): SchedulingResult {
+    if (processes.isEmpty()) return EMPTY_SCHEDULE
+
+    val timeline = mutableListOf<GanttSlot>()
+    val completionTimes = mutableMapOf<String, Int>()
+    val remBurst = processes.associate { it.id to it.burst }.toMutableMap()
+    var finished = 0
+
+    // Processes with no burst time finish the moment they arrive.
+    for (p in processes) {
+        if (p.burst <= 0) {
+            completionTimes[p.id] = p.arrival
+            finished++
+        }
+    }
+
+    var currentTime = 0
+    while (finished < processes.size) {
+        val available = processes.filter { it.arrival <= currentTime && remBurst[it.id]!! > 0 }
+        if (available.isEmpty()) {
+            val nextArrival = processes.filter { remBurst[it.id]!! > 0 }.minOf { it.arrival }
+            timeline.addSlot(null, currentTime, nextArrival)
+            currentTime = nextArrival
+            continue
+        }
+
+        val selected = available.minWithOrNull(
+            compareBy<Process>({ key(it, remBurst[it.id]!!) }, { it.arrival }, { it.id })
+        )!!
+
+        timeline.addSlot(selected.id, currentTime, currentTime + 1)
+        currentTime++
+        remBurst[selected.id] = remBurst[selected.id]!! - 1
+
+        if (remBurst[selected.id] == 0) {
+            completionTimes[selected.id] = currentTime
+            finished++
+        }
+    }
+    return buildResult(processes, timeline, completionTimes)
 }
 
 fun roundRobin(processes: List<Process>, quantum: Int): SchedulingResult {

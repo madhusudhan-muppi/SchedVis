@@ -92,24 +92,35 @@ fun NumberField(
     )
 }
 
-// A row of buttons where the selected option is filled and the others are outlined.
+// Buttons in rows of three: the selected option is filled, the others are outlined.
 @Composable
-fun OptionSelector(options: List<String>, selected: String, onSelect: (String) -> Unit) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        options.forEach { option ->
-            val padding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
-            if (option == selected) {
-                Button(
-                    onClick = { onSelect(option) },
-                    modifier = Modifier.weight(1f),
-                    contentPadding = padding
-                ) { Text(option, maxLines = 1) }
-            } else {
-                OutlinedButton(
-                    onClick = { onSelect(option) },
-                    modifier = Modifier.weight(1f),
-                    contentPadding = padding
-                ) { Text(option, maxLines = 1) }
+fun OptionSelector(
+    options: List<String>,
+    selected: String,
+    perRow: Int = 3,
+    onSelect: (String) -> Unit
+) {
+    val padding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        options.chunked(perRow).forEach { rowOptions ->
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                rowOptions.forEach { option ->
+                    if (option == selected) {
+                        Button(
+                            onClick = { onSelect(option) },
+                            modifier = Modifier.weight(1f),
+                            contentPadding = padding
+                        ) { Text(option, maxLines = 1) }
+                    } else {
+                        OutlinedButton(
+                            onClick = { onSelect(option) },
+                            modifier = Modifier.weight(1f),
+                            contentPadding = padding
+                        ) { Text(option, maxLines = 1) }
+                    }
+                }
+                // Keep button widths equal when the last row is not full.
+                repeat(perRow - rowOptions.size) { Spacer(Modifier.weight(1f)) }
             }
         }
     }
