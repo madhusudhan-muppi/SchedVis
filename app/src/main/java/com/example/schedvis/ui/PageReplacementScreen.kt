@@ -25,6 +25,7 @@ import com.example.schedvis.engine.PageResult
 import com.example.schedvis.engine.fifo
 import com.example.schedvis.engine.lru
 import com.example.schedvis.engine.optimal
+import com.example.schedvis.scan.ScannedQuestion
 import java.util.Locale
 
 val PAGE_ALGORITHMS = listOf("FIFO", "LRU", "Optimal")
@@ -50,19 +51,38 @@ class PageState {
 
     var error by mutableStateOf<String?>(null)
     var result by mutableStateOf<PageResult?>(null)
+    var playback by mutableStateOf<PlaybackState?>(null)
     var resultTitle by mutableStateOf("")
+    var simulatedAlgorithm by mutableStateOf(PAGE_ALGORITHMS[0])
     var comparison by mutableStateOf<List<Pair<String, Int>>>(emptyList())
+
+    fun selectAlgorithm(name: String) {
+        algorithm = name
+        result = null
+        playback = null
+        error = null
+    }
 
     fun loadSample() {
         referenceText = SAMPLE_REFERENCE
         framesText = "3"
         error = null
         result = null
+        playback = null
+    }
+
+    // Fills the inputs from a scanned photo and runs the simulation.
+    fun applyScan(scan: ScannedQuestion) {
+        selectAlgorithm(PAGE_ALGORITHMS.firstOrNull { it.equals(scan.algorithm, ignoreCase = true) } ?: PAGE_ALGORITHMS[0])
+        referenceText = scan.references.joinToString(" ")
+        scan.frames?.let { framesText = it.toString() }
+        simulate()
     }
 
     fun simulate() {
         error = null
         result = null
+        playback = null
 
         val tokens = referenceText.split(Regex("[\\s,]+")).filter { it.isNotEmpty() }
         if (tokens.isEmpty()) {
@@ -85,7 +105,10 @@ class PageState {
             return
         }
 
-        result = runPageAlgorithm(algorithm, pages, frames)
+        val newResult = runPageAlgorithm(algorithm, pages, frames)
+        result = newResult
+        playback = PlaybackState(newResult.steps.size)
+        simulatedAlgorithm = algorithm
         resultTitle = "$algorithm with $frames frames"
         comparison = PAGE_ALGORITHMS.map { it to runPageAlgorithm(it, pages, frames).totalFaults }
     }
@@ -106,11 +129,7 @@ fun PageReplacementScreen(state: PageState) {
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         SectionTitle("Algorithm")
-        OptionSelector(PAGE_ALGORITHMS, state.algorithm) {
-            state.algorithm = it
-            state.result = null
-            state.error = null
-        }
+        OptionSelector(PAGE_ALGORITHMS, state.algorithm) { state.selectAlgorithm(it) }
 
         OutlinedTextField(
             value = state.referenceText,
@@ -139,8 +158,10 @@ fun PageReplacementScreen(state: PageState) {
             Text(it, color = MaterialTheme.colorScheme.error)
         }
 
-        state.result?.let { result ->
-            PageResults(state.resultTitle, state.algorithm, result, state.comparison)
+        val result = state.result
+        val playback = state.playback
+        if (result != null && playback != null) {
+            PageResults(state.resultTitle, state.simulatedAlgorithm, result, playback, state.comparison)
         }
     }
 }
@@ -150,15 +171,36 @@ private fun PageResults(
     title: String,
     algorithm: String,
     result: PageResult,
+    playback: PlaybackState,
     comparison: List<Pair<String, Int>>
 ) {
+    val index = playback.index
+    val shown = result.steps.take(index + 1)
+
     HorizontalDivider()
     SectionTitle("Memory frames: $title")
-    FrameTable(result.steps)
+    PlaybackControls(playback)
+    FrameTable(result.steps, visibleCount = index + 1, highlightIndex = if (playback.atEnd) null else index)
     Text(
         "F = page fault (new page tinted red), H = hit",
         style = MaterialTheme.typography.bodySmall
     )
+    result.steps.getOrNull(index)?.let { step ->
+        StepMessage("Request #${index + 1}: page ${step.page}", step.message)
+    }
+    Text(
+        "So far: ${shown.count { it.isFault }} faults, ${shown.count { !it.isFault }} hits",
+        style = MaterialTheme.typography.bodyMedium
+    )
+    StepLog(shown.mapIndexed { i, s -> "#${i + 1} (page ${s.page}): ${s.message}" })
+
+    if (!playback.atEnd) {
+        Text(
+            "The totals appear at the end of the simulation. Tap \"Skip to result\" to see them now.",
+            style = MaterialTheme.typography.bodySmall
+        )
+        return
+    }
 
     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         MetricCard("Page faults", result.totalFaults.toString(), Modifier.weight(1f))

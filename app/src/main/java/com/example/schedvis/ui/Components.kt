@@ -25,9 +25,11 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
@@ -142,36 +144,65 @@ fun ProcessBadge(label: String, color: Color) {
 
 // Gantt chart: one colored block per time slot, width proportional to its duration.
 // Time labels sit under the left edge of each block, plus the final end time.
+// visibleUntil: during playback, only the part of the chart before this time is filled in.
+// Multilevel slots show their queue (Q1, Q2, ...) under the process name.
 @Composable
-fun GanttChart(timeline: List<GanttSlot>, processOrder: List<String>) {
+fun GanttChart(timeline: List<GanttSlot>, processOrder: List<String>, visibleUntil: Float? = null) {
     val unitWidth = 32.dp
     val blockHeight = 52.dp
-    Row(Modifier.horizontalScroll(rememberScrollState())) {
+    val outline = MaterialTheme.colorScheme.outlineVariant
+    val scroll = rememberScrollState()
+    val unitPx = with(LocalDensity.current) { unitWidth.toPx() }
+    // Keep the growing end of the chart in view.
+    LaunchedEffect(visibleUntil?.toInt()) {
+        visibleUntil?.let { scroll.animateScrollTo(((it - 6) * unitPx).toInt().coerceAtLeast(0)) }
+    }
+    Row(Modifier.horizontalScroll(scroll)) {
         timeline.forEach { slot ->
-            Column(Modifier.width(unitWidth * (slot.end - slot.start))) {
+            val length = slot.end - slot.start
+            val shown = if (visibleUntil == null) 1f
+            else ((visibleUntil - slot.start) / length).coerceIn(0f, 1f)
+            Column(Modifier.width(unitWidth * length)) {
                 Box(
                     Modifier
                         .fillMaxWidth()
                         .height(blockHeight)
-                        .background(colorFor(slot.pid, processOrder))
-                        .border(1.dp, MaterialTheme.colorScheme.surface),
-                    contentAlignment = Alignment.Center
+                        .border(1.dp, if (shown < 1f) outline else MaterialTheme.colorScheme.surface)
                 ) {
-                    Text(
-                        slot.pid ?: "Idle",
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 13.sp,
-                        maxLines = 1
+                    Box(
+                        Modifier
+                            .fillMaxWidth(shown)
+                            .height(blockHeight)
+                            .background(colorFor(slot.pid, processOrder))
                     )
+                    if (shown > 0f) {
+                        Column(
+                            Modifier.fillMaxWidth().height(blockHeight),
+                            verticalArrangement = Arrangement.Center,
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            val textColor = if (shown >= 1f) Color.White else MaterialTheme.colorScheme.onSurface
+                            Text(
+                                slot.pid ?: "Idle",
+                                color = textColor,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp,
+                                maxLines = 1
+                            )
+                            slot.queue?.let { q ->
+                                Text("Q${q + 1}", color = textColor, fontSize = 10.sp, maxLines = 1)
+                            }
+                        }
+                    }
                 }
-                Text(slot.start.toString(), fontSize = 12.sp)
+                Text(if (shown > 0f) slot.start.toString() else "", fontSize = 12.sp)
             }
         }
         timeline.lastOrNull()?.let { last ->
             Column {
                 Spacer(Modifier.height(blockHeight))
-                Text(last.end.toString(), fontSize = 12.sp)
+                val done = visibleUntil == null || visibleUntil >= last.end
+                Text(if (done) last.end.toString() else "", fontSize = 12.sp)
             }
         }
     }
@@ -179,14 +210,21 @@ fun GanttChart(timeline: List<GanttSlot>, processOrder: List<String>) {
 
 // Page replacement table: one column per page request, showing frame contents after it.
 // The frame that received a new page on a fault is tinted red.
+// During playback only the first visibleCount columns are filled and highlightIndex is outlined.
 @Composable
-fun FrameTable(steps: List<PageStep>) {
+fun FrameTable(steps: List<PageStep>, visibleCount: Int = steps.size, highlightIndex: Int? = null) {
     val cell = 40.dp
     val frameCount = steps.firstOrNull()?.frames?.size ?: 0
     val outline = MaterialTheme.colorScheme.outline
+    val scroll = rememberScrollState()
+    val columnPx = with(LocalDensity.current) { (cell + 4.dp).toPx() }
+    // Keep the current request in view.
+    LaunchedEffect(highlightIndex) {
+        highlightIndex?.let { scroll.animateScrollTo(((it - 3) * columnPx).toInt().coerceAtLeast(0)) }
+    }
 
     Row(
-        Modifier.horizontalScroll(rememberScrollState()),
+        Modifier.horizontalScroll(scroll),
         horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         // Row labels
@@ -202,13 +240,17 @@ fun FrameTable(steps: List<PageStep>) {
             Box(Modifier.size(cell))
         }
         // One column per request
-        steps.forEach { step ->
-            Column {
+        steps.forEachIndexed { index, step ->
+            val visible = index < visibleCount
+            val columnModifier = if (index == highlightIndex)
+                Modifier.background(MaterialTheme.colorScheme.primaryContainer)
+            else Modifier
+            Column(columnModifier) {
                 Box(Modifier.size(cell), contentAlignment = Alignment.Center) {
                     Text(step.page.toString(), fontWeight = FontWeight.Bold)
                 }
                 step.frames.forEach { value ->
-                    val isNewPage = step.isFault && value == step.page
+                    val isNewPage = visible && step.isFault && value == step.page
                     Box(
                         Modifier
                             .size(cell)
@@ -216,15 +258,17 @@ fun FrameTable(steps: List<PageStep>) {
                             .border(1.dp, outline),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text(value?.toString() ?: "")
+                        Text(if (visible) value?.toString() ?: "" else "")
                     }
                 }
                 Box(Modifier.size(cell), contentAlignment = Alignment.Center) {
-                    Text(
-                        if (step.isFault) "F" else "H",
-                        color = if (step.isFault) FaultColor else HitColor,
-                        fontWeight = FontWeight.Bold
-                    )
+                    if (visible) {
+                        Text(
+                            if (step.isFault) "F" else "H",
+                            color = if (step.isFault) FaultColor else HitColor,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
             }
         }
